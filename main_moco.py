@@ -33,6 +33,7 @@ from torch.utils.tensorboard import SummaryWriter
 import moco.builder
 import moco.loader
 import moco.optimizer
+from lss_utils import SimpleNuscData
 
 import vits
 
@@ -46,6 +47,7 @@ model_names = ['vit_small', 'vit_base', 'vit_conv_small', 'vit_conv_base'] + tor
 parser = argparse.ArgumentParser(description='MoCo ImageNet Pre-Training')
 parser.add_argument('data', metavar='DIR',
                     help='path to dataset')
+parser.add_argument('version', type=str)
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
                     choices=model_names,
                     help='model architecture: ' +
@@ -157,7 +159,7 @@ def main_worker(gpu, ngpus_per_node, args):
     args.gpu = gpu
 
     # suppress printing if not first GPU on each node
-    if args.multiprocessing_distributed and (args.gpu != 0 or args.rank != 0):
+    if (args.multiprocessing_distributed or args.distributed) and (args.gpu != 0 or args.rank != 0):
         def print_pass(*args):
             pass
         builtins.print = print_pass
@@ -181,8 +183,13 @@ def main_worker(gpu, ngpus_per_node, args):
         model = moco.builder.MoCo_ViT(
             partial(vits.__dict__[args.arch], stop_grad_conv1=args.stop_grad_conv1),
             args.moco_dim, args.moco_mlp_dim, args.moco_t)
-    else:
+    elif args.arch.startswith('resnet'):
         model = moco.builder.MoCo_ResNet(
+            partial(torchvision_models.__dict__[args.arch], zero_init_residual=True), 
+            args.moco_dim, args.moco_mlp_dim, args.moco_t)
+    elif args.arch.startswith('efficientnet'):
+        weight = torchvision_models.get_model_weights(args.arch).DEFAULT
+        model = moco.builder.MoCo_EfficientNet(
             partial(torchvision_models.__dict__[args.arch], zero_init_residual=True), 
             args.moco_dim, args.moco_mlp_dim, args.moco_t)
 
@@ -197,6 +204,10 @@ def main_worker(gpu, ngpus_per_node, args):
         # For multiprocessing distributed, DistributedDataParallel constructor
         # should always set the single device scope, otherwise,
         # DistributedDataParallel will use all available devices.
+        if args.gpu is None:
+            args.gpu = args.rank % args.world_size
+
+
         if args.gpu is not None:
             torch.cuda.set_device(args.gpu)
             model.cuda(args.gpu)
@@ -254,7 +265,6 @@ def main_worker(gpu, ngpus_per_node, args):
     cudnn.benchmark = True
 
     # Data loading code
-    traindir = os.path.join(args.data, 'train')
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
 
@@ -284,8 +294,8 @@ def main_worker(gpu, ngpus_per_node, args):
         normalize
     ]
 
-    train_dataset = datasets.ImageFolder(
-        traindir,
+    train_dataset = SimpleNuscData(
+        args.data, args.version,
         moco.loader.TwoCropsTransform(transforms.Compose(augmentation1), 
                                       transforms.Compose(augmentation2)))
 
